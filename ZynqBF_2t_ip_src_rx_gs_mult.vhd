@@ -20,71 +20,64 @@ USE IEEE.std_logic_1164.ALL;
 USE IEEE.numeric_std.ALL;
 USE work.ZynqBF_2t_ip_src_ZynqBF_2tx_fpga_pkg.ALL;
 
+LIBRARY UNISIM;
+use UNISIM.vcomponents.all;
+
+LIBRARY UNIMACRO;
+use UNIMACRO.vcomponents.all;
+
 ENTITY ZynqBF_2t_ip_src_rx_gs_mult IS
-  GENERIC( N                              :   integer := 2);
+  GENERIC( N                              :   integer := 2;     -- number of channels
+           NDSP                           :   integer := 64     -- number of DSPs to use for multiply-accumulate
+        );
   PORT( clk                               :   IN    std_logic;
         reset                             :   IN    std_logic;
         enb                               :   IN    std_logic;
         en                                :   IN    std_logic;  -- enable for MACC
-        rxi                               :   IN    vector_of_std_logic_vector16(0 TO 63);  -- rx i data for the correlators
-        rxq                               :   IN    vector_of_std_logic_vector16(0 TO 63);  -- rx q data for the correlators
-        gsi                               :   IN    vector_of_std_logic_vector16(0 TO (64*N-1));  -- gs i data for the correlators
-        gsq                               :   IN    vector_of_std_logic_vector16(0 TO (64*N-1))   -- gs q data for the correlators
+        rxi                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP-1));  -- rx i data for the correlators
+        rxq                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP-1));  -- rx q data for the correlators
+        gsi                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP*N-1));  -- gs i data for the correlators
+        gsq                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP*N-1))   -- gs q data for the correlators
         );
 END ZynqBF_2t_ip_src_rx_gs_mult;
 
 
 ARCHITECTURE rtl OF ZynqBF_2t_ip_src_rx_gs_mult IS
 
-  -- Signals
-  signal macc_p:                std_logic_vector(31 downto 0);
-  signal macc_a:                std_logic_vector(15 downto 0);
-  signal macc_b:                std_logic_vector(15 downto 0);
-  
-  signal macc_p_d1:             std_logic_vector(31 downto 0);
-  signal macc_p_d2:             std_logic_vector(31 downto 0);
-  signal macc_p_d3:             std_logic_vector(31 downto 0);
-  
+  component rx_gs_mult_core
+    generic( NDSP                           :   integer := 64);   -- number of DSPs to use for multiply-accumulate
+    port( clk                               :   IN    std_logic;
+          reset                             :   IN    std_logic;
+          enb                               :   IN    std_logic;
+          en                                :   IN    std_logic;  -- enable for MACC
+          rxi                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP-1));  -- rx i data for the multipy-accumulator
+          rxq                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP-1));  -- rx q data for the multipy-accumulator
+          gsi                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP-1));  -- gs i data for the multipy-accumulator
+          gsq                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP-1))   -- gs q data for the multipy-accumulator
+    );
+  end component;
+        
+
+  FOR ALL : ZynqBF_2t_ip_src_rx_gs_mult_core
+    USE ENTITY: work.ZynqBF_2t_ip_src_rx_gs_mult_core(rtl);
+        
 BEGIN
-    
-  macc_a <= rxi(63);
-  macc_b <= gsi(63);
-    
-  test_macc : macc_macro
-  GENERIC MAP(
-    DEVICE => "7SERIES",
-    LATENCY => 3,
-    WIDTH_A => 16,
-    WIDTH_B => 16
-  );
-  PORT MAP (
-    clk => clk,
-    rst => reset,
-    ce => en,
-    a => macc_a,
-    b => macc_b,
-    p => macc_p,
-    load => en,
-    load_data => macc_p_d3,
-    addsub => '1',
-    carryin => '0'
-  );
-  
-  macc_p_delays : process(clk)
-  begin
-    if clk'event and clk = '1' then
-        if reset = '1' then
-            macc_p_d1 <= (others => '0');
-            macc_p_d2 <= (others => '0');
-            macc_p_d3 <= (others => '0');
-        elsif enb = '1' then
-            macc_p_d1 <= macc_p;
-            macc_p_d2 <= macc_p_d1;
-            macc_p_d3 <= macc_p_d2;
-        end if;
-    end if;
-  end process;
-  
+   
+  gen_rx_gs_mult_cores : for i in 1 to N generate
+    rx_gs_mult_core_i : rx_gs_mult_core
+        generic map( NDSP => NDSP)
+        port map( 
+            clk => clk,
+            reset => reset,
+            enb => enb,
+            en => en,
+            rxi => rxi,
+            rxq => rxq,
+            gsi => gsi(NDSP*(i-1) to (NDSP*i - 1)),
+            gsq => gsq(NDSP*(i-1) to (NDSP*i - 1))
+        );
+  end generate;
+                
 
 END rtl;
 
