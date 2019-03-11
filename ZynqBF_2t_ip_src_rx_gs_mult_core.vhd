@@ -27,70 +27,96 @@ LIBRARY UNIMACRO;
 use UNIMACRO.vcomponents.all;
 
 ENTITY ZynqBF_2t_ip_src_rx_gs_mult_core IS
-  GENERIC( NDSP                           :   integer := 64);   -- number of DSPs to use for multiply-accumulate
+  GENERIC( NDSP                           :   integer := 64;    -- number of DSPs to use for multiply-accumulate (real number will be 2x because I and Q)
+           SCNT_END                       :   integer := 5      -- sum count end value
+        );   
   PORT( clk                               :   IN    std_logic;
         reset                             :   IN    std_logic;
         enb                               :   IN    std_logic;
         en                                :   IN    std_logic;  -- enable for MACC
+        sum_en                            :   IN    std_logic;
+        scnt                              :   IN    std_logic_vector(15 downto 0);
         rxi                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP-1));  -- rx i data for the multipy-accumulator
         rxq                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP-1));  -- rx q data for the multipy-accumulator
         gsi                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP-1));  -- gs i data for the multipy-accumulator
-        gsq                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP-1))   -- gs q data for the multipy-accumulator
-        );
+        gsq                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP-1));  -- gs q data for the multipy-accumulator
+        done                              :   OUT   std_logic;
+        dout                              :   OUT   std_logic_vector(31 downto 0)
+       );
 END ZynqBF_2t_ip_src_rx_gs_mult_core;
 
 
 ARCHITECTURE rtl OF ZynqBF_2t_ip_src_rx_gs_mult_core IS
 
-  component rx_gs_mult_dsp
-    port(
-        CLK : in STD_LOGIC;
-        A : in STD_LOGIC_VECTOR(15 downto 0);
-        B : in STD_LOGIC_VECTOR(15 downto 0);
-        C : in STD_LOGIC_VECTOR(31 downto 0);
-        P : out STD_LOGIC_VECTOR(31 downto 0);
-        CEA4 : in STD_LOGIC;
-        CEB4 : in STD_LOGIC;
-        CEC4 : in STD_LOGIC;
-        CEC5 : in STD_LOGIC
-    );
-  end component;
-
   -- Signals
-  -- signal macc_p:                std_logic_vector(31 downto 0);
-  -- signal macc_a:                std_logic_vector(15 downto 0);
-  -- signal macc_b:                std_logic_vector(15 downto 0);
-  -- signal macc_c:                std_logic_vector(31 downto 0);
+  signal macc1_p:               vector_of_signed48(0 to (NDSP-1));
+  signal macc1_a:               vector_of_signed16(0 to (NDSP-1));
+  signal macc1_b:               vector_of_signed16(0 to (NDSP-1));
+  signal macc1_c:               vector_of_signed48(0 to (NDSP-1));
+  signal macc1_m:               vector_of_signed32(0 to (NDSP-1));
   
-  signal macc_p:                vector_of_signed32(0 to (NDSP-1));
-  signal macc_a:                vector_of_signed16(0 to (NDSP-1));
-  signal macc_b:                vector_of_signed16(0 to (NDSP-1));
-  signal macc_c:                vector_of_signed32(0 to (NDSP-1));
-  signal macc_m:                vector_of_signed32(0 to (NDSP-1));
+  signal macc2_p:               vector_of_signed48(0 to (NDSP-1));
+  signal macc2_a:               vector_of_signed16(0 to (NDSP-1));
+  signal macc2_b:               vector_of_signed16(0 to (NDSP-1));
+  signal macc2_c:               vector_of_signed48(0 to (NDSP-1));
+  signal macc2_m:               vector_of_signed32(0 to (NDSP-1));
   
-  -- signal macc_p_d1:             std_logic_vector(31 downto 0);
-  -- signal macc_p_d2:             std_logic_vector(31 downto 0);
-  -- signal macc_p_d3:             std_logic_vector(31 downto 0);
-  
+  -- enable delays
   signal en_dreg:               std_logic_vector(2 downto 0);
   signal en_d1:                 std_logic;
   signal en_d2:                 std_logic;
   signal en_d3:                 std_logic;
   
+  signal sum_sel:               integer range 0 to 7;
+  signal sum_shift:             integer range 0 to 128;
+  
+  -- sum enable delays
+  signal sen_dreg:              std_logic_vector(2 downto 0);
+  signal sen_d1:                std_logic;
+  signal sen_d2:                std_logic;
+  signal sen_d3:                std_logic;
+  signal scnt_d1:               std_logic_vector(15 downto 0);
+  signal scnt_d2:               std_logic_vector(15 downto 0);
+  signal scnt_d3:               std_logic_vector(15 downto 0);
+  
+  -- output drivers
+  signal done_i:                std_logic;
+  signal dout1:                 signed(31 downto 0);
+  signal dout2:                 signed(31 downto 0);
+  
 BEGIN
+
+  sum_sel <= SCNT_END - to_integer(unsigned(scnt_d2));
+  
+  with sum_sel select sum_shift <=
+   128 when 7, 
+    64 when 6,
+    32 when 5,
+    16 when 4,
+     8 when 3,
+     4 when 2,
+     2 when 1,
+     1 when 0,
+     0 when others;
+     
    
   register_inputs : process(clk)
   begin
     if clk'event and clk = '1' then
         if reset = '1' then
             for i in 0 to (NDSP-1) loop
-                macc_a(i) <= (others => '0');
-                macc_b(i) <= (others => '0');
+                macc1_a(i) <= (others => '0');
+                macc1_b(i) <= (others => '0');
+                macc2_a(i) <= (others => '0');
+                macc2_b(i) <= (others => '0');
             end loop;
         elsif enb = '1' and en = '1' then
+        -- elsif enb = '1' then
             for i in 0 to (NDSP-1) loop
-                macc_a(i) <= signed(rxi(i));
-                macc_b(i) <= signed(gsi(i));
+                macc1_a(i) <= signed(rxi(i));
+                macc1_b(i) <= signed(gsi(i));
+                macc2_a(i) <= signed(rxq(i));
+                macc2_b(i) <= signed(gsq(i));
             end loop;
         end if;
     end if;
@@ -101,11 +127,14 @@ BEGIN
     if clk'event and clk = '1' then
         if reset = '1' then
             for i in 0 to (NDSP-1) loop
-                macc_m(i) <= (others => '0');
+                macc1_m(i) <= (others => '0');
+                macc2_m(i) <= (others => '0');
             end loop;
         elsif enb = '1' and en_d1 = '1' then
+        -- elsif enb = '1' then
             for i in 0 to (NDSP-1) loop
-                macc_m(i) <= macc_a(i) * macc_b(i);
+                macc1_m(i) <= macc1_a(i) * macc1_b(i);
+                macc2_m(i) <= macc2_a(i) * macc2_b(i);
             end loop;
         end if;
     end if;
@@ -122,73 +151,48 @@ BEGIN
     -- end if;
   -- end process;
   
-  macc_c <= macc_p;
+  macc1_c <= macc1_p;
+  macc2_c <= macc2_p;
   
   register_p : process(clk)
   begin
     if clk'event and clk = '1' then
         if reset = '1' then
             for i in 0 to (NDSP-1) loop
-                macc_p(i) <= (others => '0');
+                macc1_p(i) <= (others => '0');
+                macc2_p(i) <= (others => '0');
             end loop;
         elsif enb = '1' and en_d2 = '1' then
+        -- elsif enb = '1' then
             for i in 0 to (NDSP-1) loop
-                macc_p(i) <= macc_m(i) + macc_c(i);
+                macc1_p(i) <= resize(macc1_m(i),48) + macc1_c(i);
+                macc2_p(i) <= resize(macc2_m(i),48) + macc2_c(i);
             end loop;
-        elsif en_d2 = '0' then
-            macc_p(i) <= (others => '0');
+        elsif sen_d2 = '1' then
+            for i in 0 to (NDSP-1) loop
+                if i < sum_shift then
+                    macc1_p(i) <= macc1_p(i) + macc1_p(i+sum_shift);
+                    macc2_p(i) <= macc2_p(i) + macc2_p(i+sum_shift);
+                end if;
+            end loop;
+        elsif en_d2 = '0' and sen_dreg = "000" then
+            for i in 0 to (NDSP-1) loop
+                macc1_p(i) <= (others => '0');
+                macc2_p(i) <= (others => '0');
+            end loop;
         end if;
     end if;
   end process;
-    
-  
-  -- macc_c <= macc_p;
-  
-  
-  
-  -- test_dsp_slice : rx_gs_mult_dsp
-  -- PORT MAP(
-    -- clk => clk,
-    -- a => macc_a,
-    -- b => macc_b,
-    -- c => macc_c,
-    -- p => macc_p,
-    -- cea4 => en_i,
-    -- ceb4 => en_i,
-    -- cec4 => en_i,
-    -- cec5 => '1'
-  -- );
-  
-  
-    
-  -- test_macc : MACC_MACRO
-  -- GENERIC MAP(
-    -- DEVICE => "7SERIES",
-    -- LATENCY => 3,
-    -- WIDTH_A => 16,
-    -- WIDTH_B => 16,
-    -- WIDTH_P => 32
-  -- )
-  -- PORT MAP (
-    -- clk => clk,
-    -- rst => reset,
-    -- ce => en_i,
-    -- a => macc_a,
-    -- b => macc_b,
-    -- p => macc_p,
-    -- load => en_i,
-    -- load_data => macc_load_in,
-    -- addsub => '1',
-    -- carryin => '0'
-  -- );
   
   enable_delay_process : process(clk)
   begin
     if clk'event and clk = '1' then
         if reset = '1' then
             en_dreg <= "000";
+            sen_dreg <= "000";
         elsif enb = '1' then
             en_dreg <= en_dreg(1 downto 0) & en;
+            sen_dreg <= sen_dreg(1 downto 0) & sum_en;
         end if;
     end if;
   end process;
@@ -197,6 +201,46 @@ BEGIN
   en_d2 <= en_dreg(1);
   en_d3 <= en_dreg(2);
   
+  sen_d1 <= sen_dreg(0);
+  sen_d2 <= sen_dreg(1);
+  sen_d3 <= sen_dreg(2);
+  
+  scnt_delay_process : process(clk)
+  begin
+    if clk'event and clk = '1' then
+        if reset = '1' then
+            scnt_d1 <= x"0000";
+            scnt_d2 <= x"0000";
+            scnt_d3 <= x"0000";
+        elsif enb = '1' then
+            scnt_d1 <= scnt;
+            scnt_d2 <= scnt_d1;
+            scnt_d3 <= scnt_d2;
+        end if;
+    end if;
+  end process;
+  
+  register_outputs : process(clk)
+  begin
+    if clk'event and clk = '1' then
+        if reset = '1' then
+            done_i <= '0';
+            dout1 <= x"00000000";
+            dout2 <= x"00000000";
+        elsif enb = '1' and unsigned(scnt_d3) >= to_unsigned(SCNT_END,16) then
+            done_i <= '1';
+            dout1 <= macc1_p(0)(45 downto 14);
+            dout2 <= macc2_p(0)(45 downto 14);
+        else
+            done_i <= '0';
+            dout1 <= dout1;
+            dout2 <= dout2;
+        end if;
+    end if;
+  end process;
+            
+  done <= done_i;
+  dout <= std_logic_vector(dout1 + dout2);
 
 END rtl;
 

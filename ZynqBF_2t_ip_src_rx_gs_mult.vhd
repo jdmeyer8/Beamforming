@@ -18,6 +18,7 @@
 LIBRARY IEEE;
 USE IEEE.std_logic_1164.ALL;
 USE IEEE.numeric_std.ALL;
+USE IEEE.math_real.ALL;
 USE work.ZynqBF_2t_ip_src_ZynqBF_2tx_fpga_pkg.ALL;
 
 LIBRARY UNISIM;
@@ -28,7 +29,8 @@ use UNIMACRO.vcomponents.all;
 
 ENTITY ZynqBF_2t_ip_src_rx_gs_mult IS
   GENERIC( N                              :   integer := 2;     -- number of channels
-           NDSP                           :   integer := 64     -- number of DSPs to use for multiply-accumulate
+           NDSP                           :   integer := 64;    -- number of DSPs to use for multiply-accumulate
+           NSUM                           :   integer := 6      -- log2 of NDSP
         );
   PORT( clk                               :   IN    std_logic;
         reset                             :   IN    std_logic;
@@ -44,12 +46,16 @@ END ZynqBF_2t_ip_src_rx_gs_mult;
 
 ARCHITECTURE rtl OF ZynqBF_2t_ip_src_rx_gs_mult IS
 
-  component rx_gs_mult_core
-    generic( NDSP                           :   integer := 64);   -- number of DSPs to use for multiply-accumulate
+  component ZynqBF_2t_ip_src_rx_gs_mult_core
+    generic( NDSP                           :   integer := 64;  -- number of DSPs to use for multiply-accumulate
+             SCNT_END                       :   integer := 5    -- sum count end value
+        );   
     port( clk                               :   IN    std_logic;
           reset                             :   IN    std_logic;
           enb                               :   IN    std_logic;
           en                                :   IN    std_logic;  -- enable for MACC
+          sum_en                            :   IN    std_logic;
+          scnt                              :   IN    std_logic_vector(15 downto 0);          -- sum counter
           rxi                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP-1));  -- rx i data for the multipy-accumulator
           rxq                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP-1));  -- rx q data for the multipy-accumulator
           gsi                               :   IN    vector_of_std_logic_vector16(0 TO (NDSP-1));  -- gs i data for the multipy-accumulator
@@ -59,24 +65,113 @@ ARCHITECTURE rtl OF ZynqBF_2t_ip_src_rx_gs_mult IS
         
 
   FOR ALL : ZynqBF_2t_ip_src_rx_gs_mult_core
-    USE ENTITY: work.ZynqBF_2t_ip_src_rx_gs_mult_core(rtl);
+    USE ENTITY work.ZynqBF_2t_ip_src_rx_gs_mult_core(rtl);
+    
+    
+    
+  constant MCNT_END:    integer := 4096/NDSP-1;
+  constant SCNT_END:    unsigned(15 downto 0) := to_unsigned(NSUM, 16)-1;
+  
+  signal cs:            std_logic_vector(2 downto 0);           -- fsm current state
+  constant s_idle:      std_logic_vector(2 downto 0) := "001";  -- idle state waiting for en to go high
+  constant s_mult:      std_logic_vector(2 downto 0) := "010";  -- multiply-accumulate over all DSPs for 4096/NDSP clock cycles
+  constant s_sum:       std_logic_vector(2 downto 0) := "100";  -- summation of the parallel DSP outputs re-using some DSPs
+  
+  signal mult_done:     std_logic;
+  signal sum_done:      std_logic;
+  
+  signal mult_cnt:      integer range 0 to 4096/NDSP;
+  signal sum_cnt:       unsigned(15 downto 0);
+  signal sum_en:        std_logic;
+  
         
 BEGIN
+
+  mult_done <= '1' when mult_cnt >= MCNT_END and cs = s_mult else '0';
+  sum_done <= '1' when sum_cnt >= SCNT_END and cs = s_sum else '0';
+  
+  sum_en <= '1' when cs = s_sum else '0';
    
   gen_rx_gs_mult_cores : for i in 1 to N generate
-    rx_gs_mult_core_i : rx_gs_mult_core
-        generic map( NDSP => NDSP)
+    rx_gs_mult_core_i : ZynqBF_2t_ip_src_rx_gs_mult_core
+        generic map( 
+            NDSP => NDSP,
+            SCNT_END => to_integer(SCNT_END))
         port map( 
             clk => clk,
             reset => reset,
             enb => enb,
             en => en,
+            sum_en => sum_en,
+            scnt => std_logic_vector(sum_cnt),
             rxi => rxi,
             rxq => rxq,
             gsi => gsi(NDSP*(i-1) to (NDSP*i - 1)),
             gsq => gsq(NDSP*(i-1) to (NDSP*i - 1))
         );
   end generate;
+  
+  fsm_process: process(clk)
+  begin
+    if clk'event and clk = '1' then
+        if reset = '1' then
+            cs <= s_idle;
+        elsif enb = '1' then
+            case cs is
+                when s_idle =>
+                    if en = '1' then
+                        cs <= s_mult;
+                    else
+                        cs <= s_idle;
+                    end if;
+                when s_mult =>
+                    if mult_done = '1' then
+                        cs <= s_sum;
+                    else
+                        cs <= s_mult;
+                    end if;
+                when s_sum =>
+                    if sum_done = '1' then
+                        cs <= s_idle;
+                    else
+                        cs <= s_sum;
+                    end if;
+                when others =>
+                    cs <= s_idle;
+            end case;
+        end if;
+    end if;
+  end process;
+  
+  mult_count_process: process(clk)
+  begin
+    if clk'event and clk = '1' then
+        if reset = '1' then
+            mult_cnt <= 0;
+        elsif enb = '1' and cs = s_mult then
+            mult_cnt <= mult_cnt + 1;
+        else
+            mult_cnt <= 0;
+        end if;
+    end if;
+  end process;
+  
+  sum_count_process: process(clk)
+  begin
+    if clk'event and clk = '1' then
+        if reset = '1' then
+            sum_cnt <= x"0000";
+        elsif enb = '1' and cs = s_sum then
+            if sum_cnt >= SCNT_END then
+                sum_cnt <= x"0000";
+            else
+                sum_cnt <= sum_cnt + 1;
+            end if;
+        else
+            sum_cnt <= x"0000";
+        end if;
+    end if;
+  end process;
                 
 
 END rtl;
